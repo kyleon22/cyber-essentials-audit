@@ -1,0 +1,20 @@
+# --- Generated reports (contain device names, UPNs, licence/account data) ---
+IntuneEndpointReport_*.xlsx
+*.xlsx
+
+# --- Diagnostics output ---
+baseline-diagnostics.txt
+
+# --- Leftover/temporary script copies ---
+*.cleaned.ps1
+
+# --- OS / editor noise ---
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# --- PowerShell transcripts / logs ---
+*.log
+PowerShell_transcript.*
