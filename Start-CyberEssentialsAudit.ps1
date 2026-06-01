@@ -156,8 +156,8 @@ function Invoke-DependencyCheck {
     Write-Host 'DEPENDENCY CHECK' -ForegroundColor Cyan
     Write-Host ''
     $deps = @(
-        @{ Name = 'Microsoft.Graph.Authentication'; Kind = 'PSGallery' }
-        @{ Name = 'ImportExcel';                    Kind = 'PSGallery' }
+        @{ Name = 'Microsoft.Graph.Authentication'; Kind = 'PSGallery'; Version = '2.25.0' }
+        @{ Name = 'ImportExcel';                    Kind = 'PSGallery'; Version = '7.8.10' }
         @{ Name = 'ActiveDirectory'; Kind = 'RSAT (hybrid only)' }
         @{ Name = 'GroupPolicy';     Kind = 'RSAT (hybrid only)' }
     )
@@ -177,15 +177,24 @@ function Invoke-DependencyCheck {
         Write-Host 'Note: the audit script also checks and offers to install dependencies at launch.' -ForegroundColor DarkGray
         $a = Read-Host 'Install the missing PSGallery modules now? [Y/N]'
         if ($a -match '^(y|yes)$') {
-            foreach ($d in ($missing | Where-Object { $_.Kind -eq 'PSGallery' })) {
-                Write-Host ("Installing {0}..." -f $d.Name) -ForegroundColor Cyan
-                try {
-                    try { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop } catch { }
-                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-                    Install-Module $d.Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-                    Write-Host ("  Installed {0}." -f $d.Name) -ForegroundColor Green
-                } catch {
-                    Write-Host ("  Failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            # Capture PSGallery trust so we can restore it (don't leave it Trusted).
+            $prevPolicy = $null
+            try { $prevPolicy = (Get-PSRepository -Name PSGallery -ErrorAction Stop).InstallationPolicy } catch { }
+            try {
+                foreach ($d in ($missing | Where-Object { $_.Kind -eq 'PSGallery' })) {
+                    Write-Host ("Installing {0} v{1}..." -f $d.Name, $d.Version) -ForegroundColor Cyan
+                    try {
+                        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+                        Install-Module $d.Name -RequiredVersion $d.Version -Repository PSGallery `
+                            -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                        Write-Host ("  Installed {0}." -f $d.Name) -ForegroundColor Green
+                    } catch {
+                        Write-Host ("  Failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+                    }
+                }
+            } finally {
+                if ($prevPolicy -and $prevPolicy -ne 'Trusted') {
+                    try { Set-PSRepository -Name PSGallery -InstallationPolicy $prevPolicy -ErrorAction Stop } catch { }
                 }
             }
             if ($missing | Where-Object { $_.Kind -like 'RSAT*' }) {

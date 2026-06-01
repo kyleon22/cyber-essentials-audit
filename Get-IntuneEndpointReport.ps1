@@ -1519,7 +1519,35 @@ $solid       = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
 $pkg = $null
 try {
     $fullPath = [System.IO.Path]::GetFullPath($OutputPath)
-    if (Test-Path $fullPath) { Remove-Item $fullPath -Force -ErrorAction SilentlyContinue }
+
+    # --- Output safety #3: validate the destination path ------------------ #
+    # Require a .xlsx extension so a mistyped/socially-engineered path cannot be
+    # used to clobber an arbitrary file.
+    if ([System.IO.Path]::GetExtension($fullPath) -ne '.xlsx') {
+        throw "OutputPath must end in .xlsx (got '$fullPath')."
+    }
+    $outDir = Split-Path -Parent $fullPath
+    if (-not (Test-Path -LiteralPath $outDir)) {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
+
+    # --- Output safety #2: warn if the destination is a shared/network path  #
+    $isUnc = ([uri]$fullPath).IsUnc
+    $driveType = $null
+    try { $driveType = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$((Split-Path -Qualifier $fullPath))'" -ErrorAction SilentlyContinue).DriveType } catch { }
+    if ($isUnc -or $driveType -eq 4) {  # 4 = network drive
+        Write-Warning ("The report destination looks like a shared/network location:`n  {0}`nThis workbook contains device names, UPNs, licence and AD data - ensure the location is access-controlled." -f $fullPath)
+    }
+
+    # --- Output safety #3: don't silently delete a non-report file -------- #
+    if (Test-Path -LiteralPath $fullPath) {
+        $looksLikeReport = (Split-Path -Leaf $fullPath) -like 'IntuneEndpointReport_*.xlsx'
+        if (-not $looksLikeReport -and -not $ForceOverwrite) {
+            throw "A file already exists at '$fullPath' and does not look like a previous report (IntuneEndpointReport_*.xlsx). Re-run with -ForceOverwrite to replace it, or choose a different -OutputPath."
+        }
+        Remove-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+    }
+
     $pkg = New-Object OfficeOpenXml.ExcelPackage ([System.IO.FileInfo]$fullPath)
 
     # ----- Address helpers ------------------------------------------------ #
@@ -1535,6 +1563,22 @@ try {
     }
     function Get-Addr  { param([int]$r,[int]$c) ('{0}{1}' -f (Get-ColLetter $c), $r) }
     function Get-Range { param([int]$r1,[int]$c1,[int]$r2,[int]$c2) ('{0}:{1}' -f (Get-Addr $r1 $c1), (Get-Addr $r2 $c2)) }
+
+    # --- CSV/formula-injection neutraliser #4 ----------------------------- #
+    # Tenant/AD-controlled strings (policy names, device names, display names,
+    # UPNs) can begin with =, +, -, @, tab or CR. EPPlus writes them as inline
+    # strings (safe in the .xlsx itself), but if the data is later re-exported
+    # to CSV or opened by a client that auto-interprets formulas, such values
+    # could execute. Prefix any risky leading character with a single quote.
+    function Protect-CellText {
+        param($Value)
+        if ($null -eq $Value) { return $Value }
+        if ($Value -isnot [string]) { return $Value }   # numbers/dates pass through
+        if ($Value.Length -gt 0 -and ('=+-@' -contains $Value[0] -or $Value[0] -eq "`t" -or $Value[0] -eq "`r")) {
+            return "'" + $Value
+        }
+        return $Value
+    }
 
     # ----- EPPlus layout helpers ------------------------------------------ #
     function Set-Title {
@@ -1565,7 +1609,7 @@ try {
             for ($c = 0; $c -lt $colCount; $c++) {
                 $val = $item.$($Props[$c])
                 if ($val -is [datetime]) { $val = $val.ToString('yyyy-MM-dd HH:mm') }
-                $Ws.Cells[(Get-Addr $r ($c + 1))].Value = [string]$val
+                $Ws.Cells[(Get-Addr $r ($c + 1))].Value = Protect-CellText ([string]$val)
             }
             $r++
         }
@@ -1576,9 +1620,9 @@ try {
         param($Ws, [ref]$RowRef, $Pairs)
         $r = $RowRef.Value
         foreach ($k in $Pairs.Keys) {
-            $Ws.Cells[(Get-Addr $r 1)].Value = $k
+            $Ws.Cells[(Get-Addr $r 1)].Value = Protect-CellText ([string]$k)
             $Ws.Cells[(Get-Addr $r 1)].Style.Font.Bold = $true
-            $Ws.Cells[(Get-Addr $r 2)].Value = [string]$Pairs[$k]
+            $Ws.Cells[(Get-Addr $r 2)].Value = Protect-CellText ([string]$Pairs[$k])
             $r++
         }
         $RowRef.Value = $r

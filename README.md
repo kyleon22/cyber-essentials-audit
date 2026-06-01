@@ -188,13 +188,16 @@ These apply to `Get-IntuneEndpointReport.ps1` (and are forwarded by the launcher
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-OutputPath` | string | Timestamped `.xlsx` in the current folder | Full path for the output workbook. |
+| `-OutputPath` | string | Timestamped `.xlsx` in your **private Documents** folder | Full path for the output workbook. Must end in `.xlsx`. |
 | `-CheckInWindowWeeks` | int | `6` | Devices not seen within this many weeks are excluded. |
 | `-TenantId` | string | (interactive) | Specific tenant to sign into. |
 | `-Mode` | `CloudOnly` / `Hybrid` | (prompts) | Audit scope. |
 | `-DomainController` | string | (integrated / current DC) | FQDN of a DC/AD server to target. Override for running off-box. |
 | `-ADCredential` | PSCredential | (integrated) | Explicit domain credentials. Override for running off-box. |
 | `-DiagnoseBaselines` | switch | off | Writes `baseline-diagnostics.txt` dumping every Security Baseline intent's settings (troubleshooting). |
+| `-ForceOverwrite` | switch | off | Allow overwriting an existing output file that is **not** named like a previous report. Without it, the script refuses to delete a non-report file. |
+| `-GraphModuleVersion` | string | `2.25.0` | Pinned version of `Microsoft.Graph.Authentication` the preflight installs/imports. |
+| `-ImportExcelVersion` | string | `7.8.10` | Pinned version of `ImportExcel` the preflight installs/imports. |
 
 The launcher (`Start-CyberEssentialsAudit.ps1`) additionally accepts `-NoMenu` to bypass the TUI.
 
@@ -311,3 +314,11 @@ For deeper baseline diagnosis, run with `-DiagnoseBaselines` and inspect `baseli
 - All tenant and directory operations are **read-only**.
 - The output workbook contains device names, user principal names, and licence/account details — treat it as **sensitive** and store/share it accordingly.
 - Run from a trusted, managed host. For hybrid audits, that host should be a domain controller or a secured domain-joined management server.
+
+### Supply-chain and output safeguards
+
+- **Pinned modules.** The required PSGallery modules are installed and imported at **fixed versions** (`-GraphModuleVersion`, `-ImportExcelVersion`) rather than "latest", to avoid silently pulling an unvetted update onto a privileged host. Override only after validating a version.
+- **No persistent trust change.** When the script installs modules it reads PSGallery's current trust state and **restores it afterwards**, so the repository is not left permanently `Trusted`.
+- **Private output by default.** The report is written to your **private Documents** folder, not the working directory. If the destination resolves to a **UNC / network / mapped drive**, the script prints a warning — the workbook is sensitive and the location should be access-controlled.
+- **Safe overwrite.** `-OutputPath` must end in `.xlsx`. An existing file is only deleted if it looks like a previous report (`IntuneEndpointReport_*.xlsx`) or you pass `-ForceOverwrite`, so a mistyped path cannot destroy an unrelated file.
+- **Formula-injection neutralised.** Tenant/AD-controlled strings that begin with `=`, `+`, `-`, `@`, tab, or carriage return are prefixed with `'` before being written, so the data is safe even if later re-exported to CSV or opened by a client that auto-interprets formulas.
