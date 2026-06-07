@@ -266,7 +266,10 @@ if ($NoMenu) {
 # --------------------------------------------------------------------------- #
 #  Main menu loop                                                              #
 # --------------------------------------------------------------------------- #
-while ($true) {
+# NOTE: the loop is labelled (:menu) so the quit option can `break :menu` to
+# exit the WHILE loop. A bare `break` inside a switch only exits the switch,
+# which would just redraw the menu.
+:menu while ($true) {
     Show-Header
     Write-Host ("Mode-on-run is chosen below. Current options: window={0}wk; output={1}" -f `
         $script:cfg.CheckInWindowWeeks,
@@ -290,8 +293,8 @@ while ($true) {
         '5' { Show-Command }
         '6' { Open-OutputFolder }
         '7' { Show-Help }
-        'q' { break }
-        'Q' { break }
+        'q' { break menu }
+        'Q' { break menu }
         default { }
     }
 }
