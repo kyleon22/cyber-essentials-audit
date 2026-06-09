@@ -48,6 +48,7 @@ The result is a single Excel workbook with one tab per control area, suitable fo
 | **Shared accounts** | Accounts flagged **heuristically** as possible shared accounts (by naming pattern / missing name), with their licences and a clear manual-verification caveat. |
 | **Application whitelisting** | AppLocker, App Control for Business / WDAC, and Smart App Control policies and assignments. If none are found, a caveat prompts the auditor to confirm ThreatLocker or another third-party solution. |
 | **Password** | Security defaults status plus the custom banned-password list (Entra Password Protection), with a Cyber Essentials verdict. |
+| **Privileged users** | Every identity holding administrative privilege, flagging **standard (day-to-day) accounts that also have admin**. Covers Entra ID directory roles (including users who inherit a role via a **role-assignable group**), **PIM-eligible** assignments, and service principals/apps holding roles. In hybrid mode it also enumerates well-known **on-premises AD privileged groups** (Domain/Enterprise/Schema Admins, Administrators, Account/Server/Backup/Print Operators, Group Policy Creator Owners, DnsAdmins, etc.) resolved **recursively**, recording **direct vs nested** membership and the intermediate group a user inherits through. |
 
 In **hybrid** mode, relevant on-premises **GPO findings** are folded into the matching tabs (firewall, AutoPlay/AutoRun, application whitelisting, password) tagged as `On-prem GPO`, so the tab set stays identical to a cloud-only run.
 
@@ -232,6 +233,7 @@ Sign-in is **delegated** — the signed-in user needs read access to the relevan
 | `Policy.Read.All` | Conditional Access policies |
 | `Directory.Read.All` | Resolving users / groups / roles |
 | `User.Read.All` | Account & shared-account review |
+| `RoleManagement.Read.Directory` | Directory roles, role-assignable groups & PIM eligibility (Privileged users tab) |
 
 A role such as **Global Reader** (plus **Intune** read access) typically covers these. For the on-premises portion, the account needs read access to AD and the ability to run `Get-GPOReport`; CIM hardware queries require network reach (WinRM/RPC) to each endpoint.
 

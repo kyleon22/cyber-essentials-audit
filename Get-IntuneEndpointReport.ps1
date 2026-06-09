@@ -12,6 +12,9 @@
       * Mobile devices             - Android/iOS devices, MAM app protection
       * Status of autoplay-autorun - AutoPlay/AutoRun disabling settings
       * Shared accounts            - suspected shared accounts + licenses
+      * Privileged users           - standard users with admin privileges
+                                     (Entra roles incl. role-assignable groups,
+                                      PIM-eligible, and nested on-prem AD groups)
 
     Requires:
       * Microsoft.Graph.Authentication module (Install-Module Microsoft.Graph.Authentication)
@@ -24,6 +27,7 @@
           Policy.Read.All
           Directory.Read.All
           User.Read.All
+          RoleManagement.Read.Directory
 
 .NOTES
     Auth : Delegated / interactive (Connect-MgGraph)
@@ -262,7 +266,8 @@ $connectParams = @{
         'DeviceManagementApps.Read.All',             # app protection (MAM) policies
         'Policy.Read.All',                            # Conditional Access policies
         'Directory.Read.All',                         # resolve users/groups/roles
-        'User.Read.All'                               # account / shared-account review
+        'User.Read.All',                              # account / shared-account review
+        'RoleManagement.Read.Directory'               # directory roles, role-assignable groups & PIM eligibility (privileged users)
     )
     NoWelcome = $true
 }
@@ -1481,6 +1486,320 @@ if ($IsHybrid -and $AdAvailable) {
 }
 
 # =========================================================================== #
+#  2.9 Privileged users (standard users with admin privileges)                #
+# =========================================================================== #
+# Cyber Essentials requires administrative privilege to be tightly controlled
+# and, crucially, that day-to-day ("standard") user accounts are NOT also
+# administrative accounts. This section enumerates every identity that holds
+# administrative privilege and flags those that look like ordinary user
+# accounts - e.g. a licensed, mailbox-enabled account that is ALSO a member of
+# an admin role / privileged group, whether assigned DIRECTLY or INHERITED
+# through NESTED group membership.
+#
+#   Cloud (Entra ID) : activated directory roles -> members. Members that are
+#                      role-assignable GROUPS are expanded to their nested users
+#                      (transitiveMembers). PIM "eligible" assignments and any
+#                      service principals (apps) holding roles are also listed.
+#   On-premises (AD) : well-known privileged groups (Domain/Enterprise/Schema
+#                      Admins, Administrators, Account/Server/Backup/Print
+#                      Operators, Group Policy Creator Owners, DnsAdmins, etc.)
+#                      resolved RECURSIVELY so privilege inherited via nested
+#                      groups is captured. Direct vs nested is recorded, and for
+#                      nested members the intermediate group(s) are shown.
+Write-Host 'Reviewing privileged users (admin roles & privileged groups)...' -ForegroundColor Cyan
+
+$privFindings = @()   # unified rows -> Privileged users worksheet
+
+# Classify an account and derive a Cyber Essentials risk/action statement.
+# A LICENSED account that does not follow an admin naming convention is almost
+# certainly a person's normal productivity account that ALSO carries admin -
+# exactly the "standard user with admin privileges" anti-pattern CE warns about.
+function Get-PrivClass {
+    param([string]$Account,[string]$Name,[bool]$Licensed,[bool]$IsBuiltinAdmin)
+    $looksAdmin = $IsBuiltinAdmin -or
+                  ($Account -match '(?i)(adm|admin|priv|svc|service|_a$|-a$|\.adm)') -or
+                  ($Name    -match '(?i)\b(admin|administrator)\b')
+    if     ($IsBuiltinAdmin)            { return 'Built-in Administrator (expected, secure it)' }
+    elseif ($Licensed -and -not $looksAdmin) { return 'Standard user (licensed day-to-day account)' }
+    elseif ($Licensed)                  { return 'Admin-named but LICENSED account' }
+    elseif ($looksAdmin)                { return 'Dedicated admin account' }
+    else                                { return 'Standard user account' }
+}
+
+# ---- Cloud: Entra ID directory roles --------------------------------------- #
+# Per-user lookup cache (a user holding several roles is fetched only once).
+$privUserCache = @{}
+function Get-PrivUserInfo {
+    param([string]$Id)
+    if ([string]::IsNullOrWhiteSpace($Id)) { return $null }
+    if ($privUserCache.ContainsKey($Id)) { return $privUserCache[$Id] }
+    $info = $null
+    try {
+        $u = Get-GraphJson ("https://graph.microsoft.com/v1.0/users/{0}?`$select=id,displayName,userPrincipalName,accountEnabled,userType,assignedLicenses,onPremisesSyncEnabled" -f $Id)
+        $lic = @()
+        foreach ($al in @($u.assignedLicenses)) {
+            $sid = [string]$al.skuId
+            if ($sid) { $lic += $(if ($skuMap.ContainsKey($sid)) { $skuMap[$sid] } else { $sid }) }
+        }
+        $info = [pscustomobject]@{
+            DisplayName = [string]$u.displayName
+            UPN         = [string]$u.userPrincipalName
+            Enabled     = [bool]$u.accountEnabled
+            UserType    = [string]$u.userType
+            Licensed    = ($lic.Count -gt 0)
+            Licenses    = $(if ($lic.Count) { ($lic | Sort-Object -Unique) -join ', ' } else { 'Unlicensed' })
+            OnPremSynced= [bool]$u.onPremisesSyncEnabled
+        }
+    } catch { }
+    $privUserCache[$Id] = $info
+    return $info
+}
+
+# Expand a role-assignable group to its nested user members (transitive).
+function Get-GroupTransitiveUsers {
+    param([string]$GroupId)
+    $out = @()
+    if ([string]::IsNullOrWhiteSpace($GroupId)) { return $out }
+    $u = "https://graph.microsoft.com/v1.0/groups/$GroupId/transitiveMembers?`$select=id,displayName,userPrincipalName&`$top=999"
+    try {
+        do {
+            $r = Get-GraphJson $u
+            foreach ($m in @($r.value)) {
+                if ([string]$m.'@odata.type' -match '(?i)\.user$') { $out += $m }
+            }
+            $u = $r.'@odata.nextLink'
+        } while ($u)
+    } catch { }
+    return $out
+}
+
+# Build one unified privileged-user row (cloud).
+function New-CloudPrivRow {
+    param($Role,$Via,[bool]$High,$Info,$FallbackName,$FallbackAccount)
+    $name = if ($Info -and $Info.DisplayName) { $Info.DisplayName } else { [string]$FallbackName }
+    $acct = if ($Info -and $Info.UPN)         { $Info.UPN }         else { [string]$FallbackAccount }
+    $enabled  = if ($Info) { $(if ($Info.Enabled) { 'Yes' } else { 'No' }) } else { 'Unknown' }
+    $licensed = [bool]($Info -and $Info.Licensed)
+    $class    = Get-PrivClass -Account $acct -Name $name -Licensed $licensed -IsBuiltinAdmin $false
+    $isStd    = ($class -match '(?i)standard user')
+    $risk = if (-not $Info) { 'Privileged - could not resolve account, verify manually' }
+            elseif (-not $Info.Enabled) { 'Disabled account holds an admin role - remove the role' }
+            elseif ($isStd -and $High)  { 'HIGH - standard user holds a HIGH-privilege admin role' }
+            elseif ($isStd)             { 'Standard user holds an admin role - use a separate admin account' }
+            elseif ($licensed)          { 'Licensed admin account - prefer an unlicensed/cloud-only admin' }
+            elseif ($High)              { 'High-privilege role - confirm still required' }
+            else                        { 'Privileged - confirm still required' }
+    [pscustomobject]@{
+        Scope=$Scope_Cloud; DisplayName=$name; Account=$acct; Privilege=$Role
+        Assignment=$Via; Enabled=$enabled; AccountClass=$class; Risk=$risk
+        Notes=$(if ($Info) { "Type=$($Info.UserType); $($Info.Licenses)$(if($Info.OnPremSynced){'; on-prem synced'})" } else { '' })
+    }
+}
+$Scope_Cloud  = 'Cloud (Entra ID)'
+$Scope_OnPrem = 'On-premises (AD)'
+
+# High-privilege role names (subset elevated to "HIGH" risk when held by a
+# standard user). Every directory role is still reported; this only ranks risk.
+$highPrivRoleNames = @(
+    'Global Administrator','Privileged Role Administrator','Privileged Authentication Administrator',
+    'Security Administrator','Exchange Administrator','SharePoint Administrator','User Administrator',
+    'Conditional Access Administrator','Application Administrator','Cloud Application Administrator',
+    'Intune Administrator','Authentication Administrator','Helpdesk Administrator','Password Administrator',
+    'Hybrid Identity Administrator','Domain Name Administrator','Global Reader'
+)
+
+$cloudPrivMembers = 0
+try {
+    $roles = Get-GraphJson 'https://graph.microsoft.com/v1.0/directoryRoles'
+    foreach ($role in @($roles.value)) {
+        $roleName = [string]$role.displayName
+        $isHigh   = ($highPrivRoleNames -contains $roleName)
+        $members  = @()
+        $mUri = "https://graph.microsoft.com/v1.0/directoryRoles/$($role.id)/members?`$select=id,displayName,userPrincipalName"
+        try {
+            do {
+                $mr = Get-GraphJson $mUri
+                $members += @($mr.value)
+                $mUri = $mr.'@odata.nextLink'
+            } while ($mUri)
+        } catch { Write-Verbose "Members unreadable for role $roleName : $($_.Exception.Message)" }
+
+        foreach ($m in $members) {
+            $type = [string]$m.'@odata.type'
+            if ($type -match '(?i)\.group$') {
+                # Role-assignable group: every nested user inherits this role.
+                $gusers = Get-GroupTransitiveUsers ([string]$m.id)
+                if (@($gusers).Count -eq 0) {
+                    $privFindings += [pscustomobject]@{
+                        Scope=$Scope_Cloud; DisplayName=[string]$m.displayName; Account='(role-assignable group)'
+                        Privilege=$roleName; Assignment='Group (no nested users)'; Enabled='n/a'
+                        AccountClass='Role-assignable group'; Risk='Empty/again-nested group holds a role - review'; Notes=''
+                    }
+                }
+                foreach ($gu in $gusers) {
+                    $info = Get-PrivUserInfo ([string]$gu.id)
+                    $privFindings += (New-CloudPrivRow -Role $roleName -Via ("Nested via group: $($m.displayName)") -High $isHigh -Info $info -FallbackName $gu.displayName -FallbackAccount $gu.userPrincipalName)
+                    $cloudPrivMembers++
+                }
+            }
+            elseif ($type -match '(?i)serviceprincipal') {
+                $privFindings += [pscustomobject]@{
+                    Scope=$Scope_Cloud; DisplayName=[string]$m.displayName; Account='(service principal / app)'
+                    Privilege=$roleName; Assignment='Direct (service principal)'; Enabled='n/a'
+                    AccountClass='Service principal (application)'
+                    Risk=$(if ($isHigh) { 'Review - application holds a HIGH-privilege role' } else { 'Review - application holds an admin role' })
+                    Notes='Non-human identity; confirm the app still requires this role.'
+                }
+                $cloudPrivMembers++
+            }
+            else {
+                $info = Get-PrivUserInfo ([string]$m.id)
+                $privFindings += (New-CloudPrivRow -Role $roleName -Via 'Direct' -High $isHigh -Info $info -FallbackName $m.displayName -FallbackAccount $m.userPrincipalName)
+                $cloudPrivMembers++
+            }
+        }
+    }
+    Write-Host ("  Cloud: {0} active directory-role membership(s) reviewed." -f $cloudPrivMembers) -ForegroundColor Green
+} catch { Write-Warning "Could not enumerate Entra directory roles: $($_.Exception.Message)" }
+
+# PIM: eligible (not yet activated) role assignments - best effort.
+try {
+    $eUri = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?$expand=roleDefinition,principal'
+    $eligCount = 0
+    do {
+        $er = Get-GraphJson $eUri
+        foreach ($e in @($er.value)) {
+            $p = $e.principal
+            if (-not $p) { continue }
+            $rn = [string]$e.roleDefinition.displayName
+            if ([string]$p.'@odata.type' -match '(?i)\.user$') {
+                $info = Get-PrivUserInfo ([string]$p.id)
+                $privFindings += (New-CloudPrivRow -Role $rn -Via 'Eligible (PIM, not active)' -High ($highPrivRoleNames -contains $rn) -Info $info -FallbackName $p.displayName -FallbackAccount $p.userPrincipalName)
+                $eligCount++
+            }
+        }
+        $eUri = $er.'@odata.nextLink'
+    } while ($eUri)
+    if ($eligCount) { Write-Host ("  Cloud: {0} PIM-eligible role assignment(s) found." -f $eligCount) -ForegroundColor Green }
+} catch { Write-Verbose "PIM eligibility not available (no PIM/insufficient scope): $($_.Exception.Message)" }
+
+# ---- On-premises: privileged Active Directory groups (recursive/nested) ----- #
+if ($IsHybrid -and $AdAvailable) {
+    Write-Host '  Enumerating privileged on-premises AD groups (recursive, nested-aware)...' -ForegroundColor DarkGray
+
+    $domainSid = $null
+    try { $domainSid = (Get-ADDomain @adParams -ErrorAction Stop).DomainSID.Value } catch { }
+
+    # Domain privileged groups by well-known RID; BUILTIN groups by absolute SID.
+    $privSids = @()
+    if ($domainSid) {
+        foreach ($rid in 512,518,519,520) { $privSids += "$domainSid-$rid" }
+        #   512 Domain Admins | 518 Schema Admins | 519 Enterprise Admins
+        #   520 Group Policy Creator Owners
+    }
+    $privSids += @('S-1-5-32-544','S-1-5-32-548','S-1-5-32-549','S-1-5-32-550','S-1-5-32-551','S-1-5-32-552')
+    #   544 Administrators | 548 Account Operators | 549 Server Operators
+    #   550 Print Operators | 551 Backup Operators | 552 Replicator
+
+    $adPrivGroups = @()
+    foreach ($sid in ($privSids | Select-Object -Unique)) {
+        try { $adPrivGroups += (Get-ADGroup -Identity $sid @adParams -ErrorAction Stop) } catch { }
+    }
+    # Domain-local groups whose RID is not fixed - resolve by name (best effort).
+    foreach ($gn in @('DnsAdmins','Key Admins','Enterprise Key Admins','DHCP Administrators','Protected Users')) {
+        try { $adPrivGroups += (Get-ADGroup -Identity $gn @adParams -ErrorAction Stop) } catch { }
+    }
+    $adPrivGroups = @($adPrivGroups | Sort-Object DistinguishedName -Unique)
+
+    # Per-user AD detail cache.
+    $adUserCache = @{}
+    function Get-AdUserDetail {
+        param([string]$Dn,$AdParams)
+        if ($adUserCache.ContainsKey($Dn)) { return $adUserCache[$Dn] }
+        $d = $null
+        try {
+            $u = Get-ADUser -Identity $Dn @AdParams -Properties Enabled,DisplayName,SamAccountName,UserPrincipalName,adminCount,Description,SID,lastLogonTimestamp -ErrorAction Stop
+            $ll = $null; if ($u.lastLogonTimestamp) { try { $ll = [datetime]::FromFileTimeUtc([int64]$u.lastLogonTimestamp) } catch { } }
+            $d = [pscustomobject]@{
+                Enabled = [bool]$u.Enabled
+                Name    = $(if ($u.DisplayName) { [string]$u.DisplayName } else { [string]$u.SamAccountName })
+                Sam     = [string]$u.SamAccountName
+                UPN     = [string]$u.UserPrincipalName
+                AdminCount = [int]([string]$u.adminCount -as [int])
+                Rid     = ([string]$u.SID.Value -split '-')[-1]
+                LastLogon = $ll
+                Description = [string]$u.Description
+            }
+        } catch { }
+        $adUserCache[$Dn] = $d
+        return $d
+    }
+
+    $adPrivMembers = 0
+    foreach ($grp in $adPrivGroups) {
+        $direct = @(); $recursive = @()
+        try { $direct = @(Get-ADGroupMember -Identity $grp @adParams -ErrorAction Stop) } catch { Write-Verbose "Direct members unreadable for $($grp.Name)"; continue }
+        try { $recursive = @(Get-ADGroupMember -Identity $grp @adParams -Recursive -ErrorAction Stop) } catch { $recursive = $direct }
+
+        $directUserDNs = @($direct | Where-Object { $_.objectClass -eq 'user' } | ForEach-Object { [string]$_.distinguishedName })
+
+        # Precompute, for each directly-nested sub-group, its recursive members,
+        # so we can show WHICH group a nested user inherits privilege through.
+        $subGroupMembers = @{}
+        foreach ($sg in @($direct | Where-Object { $_.objectClass -eq 'group' })) {
+            try { $subGroupMembers[[string]$sg.name] = @((Get-ADGroupMember -Identity $sg.distinguishedName @adParams -Recursive -ErrorAction Stop) | ForEach-Object { [string]$_.distinguishedName }) }
+            catch { $subGroupMembers[[string]$sg.name] = @() }
+        }
+
+        foreach ($mem in @($recursive | Where-Object { $_.objectClass -eq 'user' })) {
+            $dn = [string]$mem.distinguishedName
+            $isDirect = ($directUserDNs -contains $dn)
+            if ($isDirect) {
+                $via = 'Direct'
+            } else {
+                $through = @($subGroupMembers.Keys | Where-Object { $subGroupMembers[$_] -contains $dn })
+                $via = if ($through.Count) { "Nested via $((($through | Sort-Object -Unique) -join ' / '))" } else { 'Nested (via group)' }
+            }
+            $du = Get-AdUserDetail -Dn $dn -AdParams $adParams
+            $isBuiltinAdmin = ($du -and $du.Rid -eq '500')
+            $name = if ($du) { $du.Name } else { ([string]$mem.name) }
+            $acct = if ($du -and $du.Sam) { $du.Sam } else { ([string]$mem.SamAccountName) }
+            $enabled = if ($du) { $(if ($du.Enabled) { 'Yes' } else { 'No' }) } else { 'Unknown' }
+            # On-prem accounts are not "licensed"; classification keys on naming +
+            # the built-in Administrator. Standard user accounts in a privileged
+            # group are the finding we care about for Cyber Essentials.
+            $class = Get-PrivClass -Account $acct -Name $name -Licensed $false -IsBuiltinAdmin $isBuiltinAdmin
+            $isStd = ($class -match '(?i)standard user')
+            $risk = if ($du -and -not $du.Enabled) { 'Disabled account in a privileged group - remove it' }
+                    elseif ($isBuiltinAdmin)       { 'Built-in Administrator - secure, monitor & restrict use' }
+                    elseif ($isStd -and -not $isDirect) { 'HIGH - standard user inherits admin via NESTED group' }
+                    elseif ($isStd)                { 'Standard user is a direct member of a privileged group' }
+                    else                           { 'Admin account - confirm still required' }
+            $notes = @()
+            if ($du) {
+                if ($du.AdminCount -eq 1) { $notes += 'adminCount=1' }
+                if ($du.LastLogon)        { $notes += ("last logon {0:yyyy-MM-dd}" -f $du.LastLogon) }
+                if ($du.Description)      { $notes += $du.Description }
+            }
+            $privFindings += [pscustomobject]@{
+                Scope=$Scope_OnPrem; DisplayName=$name; Account=$acct; Privilege=[string]$grp.Name
+                Assignment=$via; Enabled=$enabled; AccountClass=$class; Risk=$risk
+                Notes=($notes -join '; ')
+            }
+            $adPrivMembers++
+        }
+    }
+    Write-Host ("  On-premises: {0} privileged-group membership(s) across {1} group(s) reviewed." -f $adPrivMembers, $adPrivGroups.Count) -ForegroundColor Green
+}
+
+$privFindings = @($privFindings | Sort-Object Scope, Privilege, DisplayName)
+$privStandardUsers = @($privFindings | Where-Object { $_.AccountClass -match '(?i)standard user' })
+$privNested        = @($privFindings | Where-Object { $_.Assignment -match '(?i)nested|eligible' })
+$privHigh          = @($privFindings | Where-Object { $_.Risk -match '^HIGH' })
+Write-Host ("Privileged users: {0} membership row(s); {1} standard-user account(s) with admin; {2} HIGH-risk." -f `
+    $privFindings.Count, $privStandardUsers.Count, $privHigh.Count) -ForegroundColor Green
+
+# =========================================================================== #
 #  3. Write the Excel workbook via the ImportExcel module (EPPlus / no Office)#
 # =========================================================================== #
 # The script may run on a server (e.g. a domain controller) with no Microsoft
@@ -1938,6 +2257,62 @@ try {
     Invoke-AutoFit $pwSheet
     $pwSheet.Column(1).Width = 38
     $pwSheet.Column(2).Width = 60
+
+    # ===================================================================== #
+    #  Privileged users worksheet                                          #
+    # ===================================================================== #
+    $pvSheet = $pkg.Workbook.Worksheets.Add('Privileged users')
+    $pvrow = 1
+    Set-Title -Ws $pvSheet -RowIndex $pvrow -Span 9 -Text 'PRIVILEGED USERS (STANDARD USERS WITH ADMIN PRIVILEGES)' -Fill $sectionFill
+    $pvrow += 2
+
+    # Caveat / guidance banner.
+    $pvSheet.Cells["A$pvrow"].Value = 'Cyber Essentials requires that administrative privilege is controlled and that day-to-day (standard) user accounts are NOT also admin accounts. Rows flagged as a "standard user" holding admin - especially privilege INHERITED via a nested group - should be reviewed: move admin rights to a separate, dedicated (ideally unlicensed / cloud-only) admin account. "Direct" = assigned to the account itself; "Nested via ..." = inherited through group membership.'
+    $pvSheet.Cells["A$pvrow"].Style.Font.Bold = $true
+    $pvSheet.Cells["A$pvrow"].Style.Font.Color.SetColor($redFont)
+    $pvSheet.Cells["A$pvrow:I$pvrow"].Merge = $true
+    $pvSheet.Cells["A$pvrow"].Style.WrapText = $true
+    $pvSheet.Row($pvrow).Height = 75
+    $pvrow += 2
+
+    # Summary counts.
+    $pvSheet.Cells["A$pvrow"].Value = ("Total privileged membership rows: {0}" -f $privFindings.Count); $pvrow++
+    $pvSheet.Cells["A$pvrow"].Value = ("Standard user accounts holding admin: {0}" -f $privStandardUsers.Count)
+    $pvSheet.Cells["A$pvrow"].Style.Font.Bold = $true
+    $pvSheet.Cells["A$pvrow"].Style.Font.Color.SetColor($(if ($privStandardUsers.Count -gt 0) { $redFont } else { $greenFont })); $pvrow++
+    $pvSheet.Cells["A$pvrow"].Value = ("Privilege inherited via nested group / PIM-eligible: {0}" -f $privNested.Count); $pvrow++
+    $pvSheet.Cells["A$pvrow"].Value = ("HIGH-risk findings: {0}" -f $privHigh.Count)
+    $pvSheet.Cells["A$pvrow"].Style.Font.Bold = $true
+    $pvSheet.Cells["A$pvrow"].Style.Font.Color.SetColor($(if ($privHigh.Count -gt 0) { $redFont } else { $greenFont })); $pvrow += 2
+
+    if ($IsHybrid -and -not $AdAvailable) {
+        $pvSheet.Cells["A$pvrow"].Value = 'NOTE: Hybrid mode was selected but on-premises Active Directory was not reachable; only cloud (Entra ID) privilege is shown below.'
+        $pvSheet.Cells["A$pvrow"].Style.Font.Italic = $true
+        $pvSheet.Cells["A$pvrow:I$pvrow"].Merge = $true
+        $pvSheet.Cells["A$pvrow"].Style.WrapText = $true
+        $pvrow++
+    }
+
+    if ($privFindings.Count -eq 0) {
+        $pvSheet.Cells["A$pvrow"].Value = 'No privileged role / group memberships were returned (none configured, or insufficient permissions - RoleManagement.Read.Directory is required for Entra roles).'
+        $pvrow++
+    } else {
+        $ref = [ref]$pvrow
+        Write-Table -Ws $pvSheet -RowRef $ref `
+            -Headers @('Scope','Display name','Account','Privilege (role / group)','Assignment','Enabled','Account class','Risk / action','Notes') `
+            -Data $privFindings `
+            -Props   @('Scope','DisplayName','Account','Privilege','Assignment','Enabled','AccountClass','Risk','Notes') `
+            -HeaderFill $headerFill
+        $pvrow = $ref.Value
+    }
+    Invoke-AutoFit $pvSheet
+    $pvSheet.Column(2).Width = 28
+    $pvSheet.Column(3).Width = 32
+    $pvSheet.Column(4).Width = 28
+    $pvSheet.Column(5).Width = 30
+    $pvSheet.Column(7).Width = 34
+    $pvSheet.Column(8).Width = 42
+    $pvSheet.Column(9).Width = 38
 
     # ----- finalise ------------------------------------------------------- #
     $pkg.Save()
