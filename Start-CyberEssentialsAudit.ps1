@@ -265,6 +265,7 @@ function Invoke-AuditRun {
     } catch {
         Write-Host ''
         Write-Host ("Audit failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host ("Where: {0}" -f $_.ScriptStackTrace) -ForegroundColor DarkGray
         if (-not $Interactive) { exit 1 }
     }
     Write-Host ''

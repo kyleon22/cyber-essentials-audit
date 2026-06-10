@@ -236,7 +236,10 @@ function Get-CeDeviceInventory {
     $eolDevices = @($unified | Where-Object { $_.SupportStatus -eq 'EOL' })
 
     [pscustomobject]@{
-        Unified             = @($unified)
+        # ToArray(), not @(...): on PowerShell 7.6 a generic List wrapped with
+        # @() inside a [pscustomobject] literal throws "Argument types do not
+        # match".
+        Unified             = $unified.ToArray()
         Windows             = $windows
         Servers             = $servers
         MacOS               = $macos
