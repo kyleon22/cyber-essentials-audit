@@ -1,6 +1,12 @@
 # --- Generated reports (contain device names, UPNs, licence/account data) ---
 IntuneEndpointReport_*.xlsx
+CyberEssentialsAudit_*.xlsx
 *.xlsx
+IntuneEndpointReport_*.json
+CyberEssentialsAudit_*.json
+
+# --- Office lock files ---
+~$*
 
 # --- Diagnostics output ---
 baseline-diagnostics.txt

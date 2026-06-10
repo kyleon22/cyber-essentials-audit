@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<GPO xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://www.microsoft.com/GroupPolicy/Settings">
+  <Identifier>
+    <Identifier xmlns="http://www.microsoft.com/GroupPolicy/Types">{12345678-90AB-CDEF-1234-567890ABCDEF}</Identifier>
+    <Domain xmlns="http://www.microsoft.com/GroupPolicy/Types">contoso.com</Domain>
+  </Identifier>
+  <Name>Workstation hardening with password text in the description</Name>
+  <LinksTo>
+    <SOMName>Workstations</SOMName>
+    <SOMPath>contoso.com/Workstations</SOMPath>
+    <Enabled>true</Enabled>
+    <NoOverride>false</NoOverride>
+  </LinksTo>
+  <Computer>
+    <VersionDirectory>10</VersionDirectory>
+    <Enabled>true</Enabled>
+    <ExtensionData>
+      <Extension xmlns:q1="http://www.microsoft.com/GroupPolicy/Settings/Security" xsi:type="q1:SecuritySettings">
+        <q1:Account>
+          <q1:Name>MinimumPasswordLength</q1:Name>
+          <q1:SettingNumber>12</q1:SettingNumber>
+          <q1:Type>Password</q1:Type>
+        </q1:Account>
+        <q1:Account>
+          <q1:Name>LockoutBadCount</q1:Name>
+          <q1:SettingNumber>5</q1:SettingNumber>
+          <q1:Type>Account Lockout</q1:Type>
+        </q1:Account>
+      </Extension>
+      <Extension xmlns:q2="http://www.microsoft.com/GroupPolicy/Settings/WindowsFirewall" xsi:type="q2:WindowsFirewallSettings">
+        <q2:GlobalSettings>
+          <q2:PolicyVersion><q2:Value>541</q2:Value></q2:PolicyVersion>
+        </q2:GlobalSettings>
+        <q2:DomainProfile>
+          <q2:EnableFirewall><q2:Value>true</q2:Value></q2:EnableFirewall>
+        </q2:DomainProfile>
+        <q2:PublicProfile>
+          <q2:EnableFirewall><q2:Value>false</q2:Value></q2:EnableFirewall>
+        </q2:PublicProfile>
+      </Extension>
+      <Extension xmlns:q3="http://www.microsoft.com/GroupPolicy/Settings/AppLockerSettings" xsi:type="q3:AppLockerSettings">
+        <q3:RuleCollection Type="Exe" EnforcementMode="Enabled"></q3:RuleCollection>
+      </Extension>
+      <Extension xmlns:q4="http://www.microsoft.com/GroupPolicy/Settings/Registry" xsi:type="q4:RegistrySettings">
+        <q4:Policy>
+          <q4:Name>Turn off AutoPlay</q4:Name>
+          <q4:State>Enabled</q4:State>
+          <q4:Category>Windows Components/AutoPlay Policies</q4:Category>
+        </q4:Policy>
+        <q4:Policy>
+          <q4:Name>Configure Automatic Updates</q4:Name>
+          <q4:State>Enabled</q4:State>
+          <q4:Category>Windows Components/Windows Update</q4:Category>
+        </q4:Policy>
+        <q4:Policy>
+          <q4:Name>Third-party password manager deployment</q4:Name>
+          <q4:State>Enabled</q4:State>
+          <q4:Category>Unrelated</q4:Category>
+        </q4:Policy>
+      </Extension>
+    </ExtensionData>
+  </Computer>
+  <User>
+    <Enabled>true</Enabled>
+  </User>
+</GPO>

@@ -1,0 +1,34 @@
+[
+  {
+    "displayName": "Ring 1 - fast (compliant)",
+    "qualityUpdatesDeferralPeriodInDays": 0,
+    "deadlineForQualityUpdatesInDays": 7,
+    "deadlineGracePeriodInDays": 2,
+    "qualityUpdatesPaused": false,
+    "featureUpdatesDeferralPeriodInDays": 14,
+    "automaticUpdateMode": "autoInstallAtMaintenanceTime"
+  },
+  {
+    "displayName": "Ring 2 - slow (non-compliant)",
+    "qualityUpdatesDeferralPeriodInDays": 10,
+    "deadlineForQualityUpdatesInDays": 7,
+    "deadlineGracePeriodInDays": 5,
+    "qualityUpdatesPaused": false,
+    "featureUpdatesDeferralPeriodInDays": 60,
+    "automaticUpdateMode": "autoInstallAtMaintenanceTime"
+  },
+  {
+    "displayName": "Ring 3 - paused",
+    "qualityUpdatesDeferralPeriodInDays": 0,
+    "deadlineForQualityUpdatesInDays": 7,
+    "deadlineGracePeriodInDays": 0,
+    "qualityUpdatesPaused": true,
+    "automaticUpdateMode": "autoInstallAtMaintenanceTime"
+  },
+  {
+    "displayName": "Ring 4 - no deadline",
+    "qualityUpdatesDeferralPeriodInDays": 3,
+    "qualityUpdatesPaused": false,
+    "automaticUpdateMode": "userDefined"
+  }
+]
