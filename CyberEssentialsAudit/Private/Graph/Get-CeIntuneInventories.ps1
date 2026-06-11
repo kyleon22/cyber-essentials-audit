@@ -11,7 +11,12 @@ function Get-CeDeviceConfigurations {
 }
 
 # Settings-catalog policies WITH their parsed (definitionId, value) pairs.
-# Returns objects: @{ Policy; Pairs }.
+# Includes endpoint-security and SECURITY BASELINE policies - since ~2023
+# new baselines are settings-catalog policies distinguished only by their
+# templateReference. Returns objects:
+#   @{ Policy; Pairs; SettingsRead; TemplateFamily }
+# SettingsRead = $false means the per-policy settings call failed (also
+# journaled, so dependent checks report Unknown instead of a silent miss).
 function Get-CeCatalogPolicies {
     [CmdletBinding()]
     param()
@@ -20,11 +25,19 @@ function Get-CeCatalogPolicies {
     $policies = Get-CeCollection -Key 'configurationPolicies' -Uri $script:CeUri.ConfigurationPolicies -Area 'ConfigurationPolicies'
     foreach ($p in @($policies)) {
         $pairs = @()
+        $settingsRead = $true
         try {
             $settings = Get-CeGraphPaged -Uri ("{0}/{1}/settings" -f $script:CeUri.ConfigurationPolicies, $p.id) -Area 'ConfigurationPolicies'
             $pairs = @(Get-CeCatalogSettingPairs $settings)
-        } catch { }
-        $out.Add([pscustomobject]@{ Policy = $p; Pairs = $pairs })
+        } catch { $settingsRead = $false }
+        $family = ''
+        try { $family = [string]$p.templateReference.templateFamily } catch { }
+        $out.Add([pscustomobject]@{
+            Policy         = $p
+            Pairs          = $pairs
+            SettingsRead   = $settingsRead
+            TemplateFamily = $family
+        })
     }
     $result = $out.ToArray()
     $script:Ce.Collections['catalogPolicies'] = $result

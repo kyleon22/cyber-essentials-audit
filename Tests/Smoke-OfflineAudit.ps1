@@ -22,6 +22,18 @@ $m = Import-Module (Join-Path $root 'CyberEssentialsAudit\CyberEssentialsAudit.p
         param([string]$Uri, [string]$Area)
         switch -Regex ($Uri) {
             'identitySecurityDefaultsEnforcementPolicy' { return [pscustomobject]@{ isEnabled = $false } }
+            # Legacy MDM security baseline (intent): the AutoPlay category is
+            # named "Auto Play" WITH A SPACE - the regression this smoke guards.
+            'intents/int1/categories/c1/settings' {
+                return [pscustomobject]@{ value = @(
+                    [pscustomobject]@{ definitionId = 'deviceConfiguration--windows10GeneralConfiguration_autoPlayMode'; value = 'blocked' }
+                ) }
+            }
+            'intents/int1/categories' {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'c1'; displayName = 'Auto Play' }) }
+            }
+            'templates/tmpl1/categories' { return [pscustomobject]@{ value = @() } }
+            'templates/tmpl1'            { return [pscustomobject]@{ displayName = 'MDM Security Baseline for Windows 10 and later for December 2020' } }
             '/settings$'                                { return [pscustomobject]@{ value = @() } }
             'configurationPolicies/.+/settings'         { return [pscustomobject]@{ value = @() } }
             'users/.+\?'                                { return [pscustomobject]@{ id = 'u1'; displayName = 'Alice Adams'; userPrincipalName = 'alice@contoso.com'; accountEnabled = $true; userType = 'Member'; assignedLicenses = @(@{ skuId = 'sku1' }); onPremisesSyncEnabled = $false } }
@@ -35,6 +47,19 @@ $m = Import-Module (Join-Path $root 'CyberEssentialsAudit\CyberEssentialsAudit.p
         switch -Regex ($Uri) {
             '/[^/?]+/assignments$' {
                 return @([pscustomobject]@{ target = [pscustomobject]@{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' } })
+            }
+            'configurationPolicies/cp2/settings' {
+                # Modern security baseline (settings catalog): AutoPlay settings.
+                return @(
+                    [pscustomobject]@{
+                        id = '0'
+                        settingInstance = [pscustomobject]@{
+                            settingDefinitionId = 'device_vendor_msft_policy_config_autoplay_turnoffautoplay'
+                            settingInstanceTemplateReference = [pscustomobject]@{ settingInstanceTemplateId = 'x' }
+                            choiceSettingValue = [pscustomobject]@{ value = 'device_vendor_msft_policy_config_autoplay_turnoffautoplay_1'; children = @() }
+                        }
+                    }
+                )
             }
             'configurationPolicies/.+/settings' {
                 return @([pscustomobject]@{
@@ -90,7 +115,14 @@ $m = Import-Module (Join-Path $root 'CyberEssentialsAudit\CyberEssentialsAudit.p
                 )
             }
             'configurationPolicies$|configurationPolicies\?' {
-                return @([pscustomobject]@{ id = 'cp1'; name = 'Defender AV policy'; platforms = 'windows10' })
+                return @(
+                    [pscustomobject]@{ id = 'cp1'; name = 'Defender AV policy'; platforms = 'windows10' }
+                    [pscustomobject]@{ id = 'cp2'; name = 'Security Baseline for Windows 10 and later'; platforms = 'windows10'
+                                       templateReference = [pscustomobject]@{ templateFamily = 'Baseline' } }
+                )
+            }
+            'intents$|intents\?' {
+                return @([pscustomobject]@{ id = 'int1'; displayName = 'MDM Security Baseline - Dec 2020'; templateId = 'tmpl1' })
             }
             'v1\.0/users\?' {
                 return @(

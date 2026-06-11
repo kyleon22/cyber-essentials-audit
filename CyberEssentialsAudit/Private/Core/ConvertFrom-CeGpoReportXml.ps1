@@ -76,7 +76,9 @@ function ConvertFrom-CeGpoReportXml {
 
     # ---- Administrative-template policies (configured Name + State) ---------
     $policyPatterns = @(
-        @{ Control = 'AutoPlay/AutoRun';   Pattern = '(?i)autoplay|autorun' }
+        # Separator-tolerant on purpose ("AutoPlay", "Auto Play", "auto-run").
+        # Keep in sync with $script:CeAutoplayPattern in ConvertTo-CeAutoplaySetting.ps1.
+        @{ Control = 'AutoPlay/AutoRun';   Pattern = '(?i)auto[\s\-_]?(play|run)' }
         @{ Control = 'Malware protection'; Pattern = '(?i)defender|antivirus|virus|real-?time protection' }
         @{ Control = 'Security updates';   Pattern = '(?i)automatic updates|windows update|quality updates|feature updates' }
         @{ Control = 'Firewall';           Pattern = '(?i)firewall' }

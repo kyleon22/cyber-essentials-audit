@@ -1,28 +1,66 @@
-# Secure configuration: AutoPlay / AutoRun disabled. Consumes the shared
-# cached inventories (settings catalog, admin templates, OMA-URI profiles,
-# intents) plus structured hybrid GPO findings.
+# Secure configuration: AutoPlay / AutoRun disabled.
+#
+# Robustness rules (an enabled security baseline must NEVER be reported as
+# "no setting found"):
+#   * Matching uses the separator-tolerant $script:CeAutoplayPattern - the
+#     legacy MDM security baselines surface these settings as "Auto Play" /
+#     "Auto play default auto run behavior" (with spaces), which a plain
+#     'autoplay|autorun' regex misses entirely.
+#   * Five sources are scanned: settings catalog (INCLUDING modern security
+#     baselines, which are settings-catalog policies with a templateReference),
+#     administrative templates, custom OMA-URI profiles, legacy endpoint
+#     security / baseline intents, and hybrid GPO findings.
+#   * Every source records how many objects it scanned and whether any read
+#     failed; a failed read can only ever produce Unknown, never Fail.
 function Get-CeAutoplayCheck {
     [CmdletBinding()]
     param([object[]]$GpoFindings = @())
 
     Write-Host 'Reviewing AutoPlay / AutoRun policies...' -ForegroundColor Cyan
+    $pattern  = $script:CeAutoplayPattern
     $findings = @()
+    $scan = [ordered]@{
+        CatalogPoliciesScanned   = 0
+        CatalogSettingsUnreadable = 0
+        AdminTemplatesScanned    = 0
+        OmaProfilesScanned       = 0
+        IntentsScanned           = 0
+        GpoFindingsSupplied      = @($GpoFindings).Count
+    }
 
-    # 1) Settings catalog.
+    # 1) Settings catalog - includes modern security baselines (templateReference).
     try {
         foreach ($cp in @(Get-CeCatalogPolicies)) {
-            $hits = @($cp.Pairs | Where-Object { $_.Id -match '(?i)autoplay|autorun' })
-            if ($hits.Count -eq 0) { continue }
-            $asg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.ConfigurationPolicies -Id $cp.Policy.id -Area 'ConfigurationPolicies')
-            foreach ($h in $hits) {
-                $set   = ("$($h.Id)" -split '_config_')[-1]
-                $state = if     ("$($h.Value)" -match '(?i)_1$|_true$|donotexecute|donotplay|enabled') { 'Enabled (disables AutoPlay/AutoRun)' }
-                         elseif ("$($h.Value)" -match '(?i)_0$|_false$') { 'Not enforced' }
-                         else   { "$($h.Value)" }
+            $scan.CatalogPoliciesScanned++
+            if (-not $cp.SettingsRead) { $scan.CatalogSettingsUnreadable++ }
+            $source = if ($cp.TemplateFamily -match '(?i)baseline') { 'Security baseline (settings catalog)' }
+                      elseif ($cp.TemplateFamily) { "Endpoint security (settings catalog)" }
+                      else { 'Settings catalog' }
+            $asg = $null
+            foreach ($pair in @($cp.Pairs)) {
+                $ap = ConvertTo-CeAutoplaySetting -Pair $pair
+                if ($null -eq $ap) { continue }
+                if ($null -eq $asg) {
+                    $asg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.ConfigurationPolicies -Id $cp.Policy.id -Area 'ConfigurationPolicies')
+                }
                 $findings += [pscustomobject]@{
-                    Source = 'Settings catalog'; PolicyName = $cp.Policy.name; Setting = $set
-                    State = $state; Included = $asg.Included; Excluded = $asg.Excluded
-                    Enforces = ($state -like 'Enabled*' -and $asg.IsAssigned)
+                    Source = $source; PolicyName = $cp.Policy.name; Setting = $ap.Setting
+                    State = $ap.State; Included = $asg.Included; Excluded = $asg.Excluded
+                    Enforces = ($ap.Disables -and $asg.IsAssigned)
+                    Configured = $ap.Disables
+                }
+            }
+            # Defence in depth: a policy NAMED for AutoPlay whose settings did
+            # not yield a match (or could not be read) still gets surfaced.
+            if ("$($cp.Policy.name)" -match $pattern -and -not @($findings | Where-Object { $_.PolicyName -eq $cp.Policy.name }).Count) {
+                if ($null -eq $asg) {
+                    $asg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.ConfigurationPolicies -Id $cp.Policy.id -Area 'ConfigurationPolicies')
+                }
+                $findings += [pscustomobject]@{
+                    Source = $source; PolicyName = $cp.Policy.name
+                    Setting = $(if ($cp.SettingsRead) { 'Policy name indicates AutoPlay/AutoRun - review the policy' } else { 'Policy settings could not be read - review manually' })
+                    State = 'Review required'; Included = $asg.Included; Excluded = $asg.Excluded
+                    Enforces = $false; Configured = $false
                 }
             }
         }
@@ -32,20 +70,23 @@ function Get-CeAutoplayCheck {
     try {
         $gpConfigs = Get-CeCollection -Key 'groupPolicyConfigs' -Uri $script:CeUri.GroupPolicyConfigs -Area 'AdminTemplates'
         foreach ($cfg in @($gpConfigs)) {
+            $scan.AdminTemplatesScanned++
             $dv = $null
             try { $dv = Get-CeGraphJson -Uri ("{0}/{1}/definitionValues?`$expand=definition" -f $script:CeUri.GroupPolicyConfigs, $cfg.id) -Area 'AdminTemplates' } catch { }
             $cfgAsg = $null
             foreach ($d in @($dv.value)) {
                 $name = [string]$d.definition.displayName
-                if ($name -notmatch '(?i)autoplay|autorun') { continue }
+                if ($name -notmatch $pattern) { continue }
                 if ($null -eq $cfgAsg) {
                     $cfgAsg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.GroupPolicyConfigs -Id $cfg.id -Area 'AdminTemplates')
                 }
+                $enabled = [bool]$d.enabled
                 $findings += [pscustomobject]@{
                     Source = 'Administrative template'; PolicyName = $cfg.displayName; Setting = $name
-                    State = $(if ($d.enabled) { 'Enabled' } else { 'Disabled / Not configured' })
+                    State = $(if ($enabled) { 'Enabled' } else { 'Disabled / Not configured' })
                     Included = $cfgAsg.Included; Excluded = $cfgAsg.Excluded
-                    Enforces = ([bool]$d.enabled -and $cfgAsg.IsAssigned)
+                    Enforces = ($enabled -and $cfgAsg.IsAssigned)
+                    Configured = $enabled
                 }
             }
         }
@@ -55,10 +96,11 @@ function Get-CeAutoplayCheck {
     try {
         foreach ($p in @(Get-CeDeviceConfigurations)) {
             if ([string]$p.'@odata.type' -notmatch '(?i)customConfiguration') { continue }
+            $scan.OmaProfilesScanned++
             $dcAsg = $null
             foreach ($oma in @($p.omaSettings)) {
                 $omaUri = [string]$oma.omaUri
-                if ($omaUri -notmatch '(?i)autoplay|autorun') { continue }
+                if ("$omaUri $($oma.displayName)" -notmatch $pattern) { continue }
                 if ($null -eq $dcAsg) {
                     $dcAsg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.DeviceConfigurations -Id $p.id -Area 'DeviceConfigurations')
                 }
@@ -67,59 +109,87 @@ function Get-CeAutoplayCheck {
                     Setting = ("{0} [{1}]" -f $oma.displayName, $omaUri)
                     State = "$($oma.value)"; Included = $dcAsg.Included; Excluded = $dcAsg.Excluded
                     Enforces = $dcAsg.IsAssigned
+                    Configured = $true
                 }
             }
         }
     } catch { }
 
-    # 4) Security baselines / endpoint-security intents.
+    # 4) Legacy endpoint-security / security-baseline intents. Match on the
+    #    category name ("Auto Play"), the resolved setting display name
+    #    ("Block auto play for non-volume devices") AND the definitionId.
     try {
         foreach ($ii in @(Get-CeIntentInventory)) {
+            $scan.IntentsScanned++
             $iAsg = $null
             foreach ($cs in @($ii.CategorySettings)) {
                 $did  = [string]$cs.Setting.definitionId
                 $name = [string]$ii.DefMap[$did]
                 $hay  = "$($cs.Category) $did $name"
-                if ($hay -notmatch '(?i)autoplay|autorun') { continue }
+                if ($hay -notmatch $pattern) { continue }
                 if ($null -eq $iAsg) {
                     $iAsg = Get-CeAssignmentSummary (Get-CePolicyAssignments -BaseUri $script:CeUri.Intents -Id $ii.Intent.id -Area 'Intents')
                 }
                 $label = if ($name) { $name } elseif ($cs.Category) { "$($cs.Category) / $(($did -split '_') | Select-Object -Last 1)" } else { ($did -split '_') | Select-Object -Last 1 }
                 $valStr = Get-CeIntentSettingValue $cs.Setting
+                # Legacy-baseline values are readable strings ("blocked",
+                # "doNotExecute", "disabled" = AutoPlay off) or booleans.
+                $disables = ($valStr -match '(?i)enabled|true|blocked|disallow|donotexecute|doNotExecute|notAllowed|disabled')
                 $findings += [pscustomobject]@{
-                    Source = 'Security baseline (intent)'; PolicyName = $ii.Intent.displayName; Setting = $label
+                    Source = $(if ($ii.TemplateName -match '(?i)baseline') { 'Security baseline (intent)' } else { 'Endpoint security (intent)' })
+                    PolicyName = $ii.Intent.displayName; Setting = $label
                     State = $valStr; Included = $iAsg.Included; Excluded = $iAsg.Excluded
-                    Enforces = ($valStr -match '(?i)enabled|true|blocked|disallow' -and $iAsg.IsAssigned)
+                    Enforces = ($disables -and $iAsg.IsAssigned)
+                    Configured = $disables
                 }
             }
         }
     } catch { }
 
-    # 5) Hybrid GPO (structured).
+    # 5) Hybrid GPO (structured parse).
     foreach ($gf in @($GpoFindings | Where-Object { $_.Control -eq 'AutoPlay/AutoRun' })) {
+        $enabled = ($gf.Value -match '(?i)enabled|true')
         $findings += [pscustomobject]@{
             Source = 'On-prem GPO'; PolicyName = $gf.GPO; Setting = $gf.Setting
             State = $gf.Value; Included = $gf.LinkedOUs; Excluded = 'N/A (GPO link scope)'
-            Enforces = ($gf.Value -match '(?i)enabled' -and $gf.LinkedOUs -ne 'Not linked')
+            Enforces = ($enabled -and $gf.LinkedOUs -ne 'Not linked')
+            Configured = $enabled
         }
     }
 
-    $findings = @($findings)
-    $enforcing = @($findings | Where-Object { $_.Enforces })
-    $areaFailed = Test-CeAreaFailed -Area @('ConfigurationPolicies', 'AdminTemplates', 'DeviceConfigurations', 'Intents')
+    $findings   = @($findings)
+    $enforcing  = @($findings | Where-Object { $_.Enforces })
+    $configured = @($findings | Where-Object { $_.Configured })
+    $areaFailed = (Test-CeAreaFailed -Area @('ConfigurationPolicies', 'AdminTemplates', 'DeviceConfigurations', 'Intents')) -or
+                  ($scan.CatalogSettingsUnreadable -gt 0)
+
+    $coverage = ("Scanned: {0} settings-catalog policies (incl. baselines{1}), {2} administrative templates, {3} OMA-URI profiles, {4} endpoint-security/baseline intents{5}." -f `
+        $scan.CatalogPoliciesScanned,
+        $(if ($scan.CatalogSettingsUnreadable) { "; {0} unreadable" -f $scan.CatalogSettingsUnreadable } else { '' }),
+        $scan.AdminTemplatesScanned, $scan.OmaProfilesScanned, $scan.IntentsScanned,
+        $(if ($scan.GpoFindingsSupplied) { ", {0} GPO finding(s)" -f $scan.GpoFindingsSupplied } else { '' }))
 
     if ($enforcing.Count -gt 0) {
         $status = 'Pass'
-        $reason = ("{0} assigned setting(s) disable AutoPlay/AutoRun: {1}" -f $enforcing.Count, (($enforcing | Select-Object -First 5 | ForEach-Object { $_.PolicyName } | Sort-Object -Unique) -join '; '))
+        $reason = ("{0} assigned setting(s) disable AutoPlay/AutoRun: {1}. {2}" -f `
+            $enforcing.Count,
+            (($enforcing | Select-Object -First 5 | ForEach-Object { $_.PolicyName } | Sort-Object -Unique) -join '; '),
+            $coverage)
+    } elseif ($configured.Count -gt 0) {
+        $status = 'Manual'
+        $reason = ("AutoPlay/AutoRun is disabled in {0} policy/policies but NONE is assigned to any device/group - assign the policy or confirm devices are covered another way: {1}. {2}" -f `
+            $configured.Count,
+            (($configured | Select-Object -First 5 | ForEach-Object { $_.PolicyName } | Sort-Object -Unique) -join '; '),
+            $coverage)
     } elseif ($findings.Count -gt 0) {
         $status = 'Manual'
-        $reason = 'AutoPlay/AutoRun settings exist but none was confirmed as enforced on assigned devices - review the tab'
+        $reason = ("AutoPlay/AutoRun-related settings were found but none clearly disables it - review the tab. {0}" -f $coverage)
     } elseif ($areaFailed) {
         $status = 'Unknown'
-        $reason = 'Policy reads failed - AutoPlay status cannot be verified (see Run info tab)'
+        $reason = ("One or more policy sources could not be read, so AutoPlay status CANNOT be verified (see Run info tab). {0}" -f $coverage)
     } else {
         $status = 'Fail'
-        $reason = 'No policy disabling AutoPlay/AutoRun was found'
+        $reason = ("No policy disabling AutoPlay/AutoRun was found in any source. {0}" -f $coverage)
     }
 
     [pscustomobject]@{
@@ -127,9 +197,11 @@ function Get-CeAutoplayCheck {
             New-CeCheckResult -Control 'Secure configuration' -CheckId 'CE-SC-01' `
                 -Title 'AutoPlay / AutoRun disabled' `
                 -Status $status -Reason $reason `
-                -Evidence ("{0} finding(s); {1} enforcing" -f $findings.Count, $enforcing.Count) `
+                -Evidence ("{0} finding(s); {1} enforcing; {2} configured-but-unassigned" -f $findings.Count, $enforcing.Count, ($configured.Count - $enforcing.Count)) `
                 -DetailSheet 'Status of autoplay-autorun'
         )
         Findings = $findings
+        Scan     = $scan
+        Coverage = $coverage
     }
 }

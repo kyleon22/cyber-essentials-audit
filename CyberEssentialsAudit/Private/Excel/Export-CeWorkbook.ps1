@@ -491,9 +491,15 @@ function Export-CeWorkbook {
         $row += 2
         $autoData = @($Audit.Sections.Autoplay.Findings)
         $ws.Cells[(Get-CeAddr $row 1)].Value = ("Settings disabling/affecting AutoPlay or AutoRun found: {0}" -f $autoData.Count)
-        $ws.Cells[(Get-CeAddr $row 1)].Style.Font.Bold = $true; $row += 2
+        $ws.Cells[(Get-CeAddr $row 1)].Style.Font.Bold = $true; $row++
+        if ($Audit.Sections.Autoplay.Coverage) {
+            $ref = [ref]$row
+            Write-CeBanner -Ws $ws -RowRef $ref -Span 6 -Height 30 -Text ("Where the audit looked: {0}" -f $Audit.Sections.Autoplay.Coverage)
+            $row = $ref.Value
+        }
+        $row++
         if ($autoData.Count -eq 0) {
-            $ws.Cells[(Get-CeAddr $row 1)].Value = 'No policy or setting that disables AutoPlay/AutoRun was found.'; $row++
+            $ws.Cells[(Get-CeAddr $row 1)].Value = 'No policy or setting that disables AutoPlay/AutoRun was found in any scanned source.'; $row++
         } else {
             $ref = [ref]$row
             Write-CeTable -Ws $ws -RowRef $ref -Headers @('Source','Policy name','Setting','State','Included','Excluded') -Data $autoData -Props @('Source','PolicyName','Setting','State','Included','Excluded')
